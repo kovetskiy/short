@@ -1,34 +1,32 @@
 package main
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"math/big"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/docopt/docopt-go"
+	"github.com/nsf/termbox-go"
 )
 
 const (
 	usage = `Short 1.0, short term memory tester.
 
 Usage:
-	./short [options]
+    ./short [options]
 
 Options:
-	--dry         run tests and show results.
-	-f <file>     use specified file as database [default: ~/.config/short-term].
-	-n <number>   show specified count of tests [default: 20].
-	-c <count>    show specified count of numbers in tests [default: 7].
-	-i <min>      use specified number as minimum value of number [default: 10]
-	-a <max>      use specified number as maximum value of number [default: 99]
+    -f <file>     use specified file as database [default: ~/.config/short-term].
+    -n <number>   show specified count of tests [default: 20].
+    -c <count>    show specified count of numbers in tests [default: 7].
+    -i <min>      use specified number as minimum value of number [default: 10]
+    -a <max>      use specified number as maximum value of number [default: 99]
 `
 )
 
@@ -42,8 +40,6 @@ type Result struct {
 func main() {
 	args, _ := docopt.Parse(usage, nil, true, "1.0", false)
 
-	dry := args["--dry"].(bool)
-
 	file := args["-f"].(string)
 	if file[:2] == "~/" {
 		file = os.Getenv("HOME") + file[1:]
@@ -56,18 +52,16 @@ func main() {
 		maxNumber, _    = strconv.Atoi(args["-a"].(string))
 	)
 
+	err := termbox.Init()
+	if err != nil {
+		panic(err)
+	}
+
 	clearScreen()
 
 	results := []Result{}
 	for i := 0; i < testsCount; i++ {
 		result := runTest(minNumber, maxNumber, numbersCount)
-		if dry {
-			fmt.Println("Score: ", result.Score)
-			fmt.Println("Duration: ", result.Duration)
-			wait()
-			clearScreen()
-		}
-
 		results = append(results, result)
 	}
 
@@ -82,16 +76,18 @@ func main() {
 	}
 
 	avgDuration := sumDuration / float64(len(results))
+	avgScore := float64(sumScore) / float64(len(results))
 
-	if dry {
-		fmt.Println("Total score: ", sumScore)
-		fmt.Println("Average duration: ", avgDuration)
-	}
+	termbox.Close()
+
+	fmt.Printf("Score: %.2f (%.2f sec)\n", avgScore, avgDuration)
 
 	saveResults(file, results, sumScore, avgDuration)
 }
 
-func saveResults(file string, results []Result, totalScore int, avgDuration float64) {
+func saveResults(
+	file string, results []Result, totalScore int, avgDuration float64,
+) {
 	type DatabaseItem struct {
 		Date        string   `json:"date"`
 		AvgDuration float64  `json:"avg_duration"`
@@ -132,21 +128,41 @@ func runTest(minNumber, maxNumber, numbersCount int) Result {
 		minNumber, maxNumber, numbersCount,
 	)
 
-	strs := []string{}
+	numberStrings := []string{}
 	for _, number := range validNumbers {
-		strs = append(strs, strconv.Itoa(number))
+		numberStrings = append(numberStrings, strconv.Itoa(number))
 	}
+
+	wholeTest := strings.Join(numberStrings, " ")
+
+	width, height := termbox.Size()
 
 	timeStart := time.Now()
 
-	fmt.Println(strings.Join(strs, " "))
+	x := width/2 - len(wholeTest)/2
+	y := height / 2
+
+	termbox.SetCursor(x, y)
+
+	for _, symbol := range wholeTest {
+		x += 1
+		termbox.SetCell(
+			x, y, symbol, termbox.ColorDefault, termbox.ColorDefault,
+		)
+	}
+
+	termbox.HideCursor()
+	termbox.Flush()
 
 	wait() //wait for input 'Enter'
-	clearScreen()
-
-	userNumbers := getNumbersFromStdin()
 
 	timeFinish := time.Now()
+
+	clearScreen()
+
+	termbox.SetCursor(x-len(wholeTest)+1, y)
+	termbox.Flush()
+	userNumbers := getNumbers(x-len(wholeTest), y)
 
 	clearScreen()
 
@@ -174,20 +190,50 @@ func generateRandomNumbers(min, max, count int) []int {
 	return numbers
 }
 
-func getNumbersFromStdin() []int {
+func getNumbers(x, y int) []int {
 	numbers := []int{}
+	text := readText(x, y)
 
-	scanner := bufio.NewScanner(os.Stdin)
-	if scanner.Scan() {
-		pieces := strings.Split(scanner.Text(), " ")
-		for _, piece := range pieces {
-			number, _ := strconv.Atoi(piece)
-			numbers = append(numbers, number)
-		}
+	pieces := strings.Split(text, " ")
+	for _, piece := range pieces {
+		number, _ := strconv.Atoi(piece)
+		numbers = append(numbers, number)
 	}
 
 	return numbers
+}
 
+func readText(x, y int) string {
+	text := ""
+	for {
+		event := termbox.PollEvent()
+		if event.Type != termbox.EventKey {
+			continue
+		}
+
+		if event.Ch >= '0' && event.Ch <= '9' {
+			text += string(event.Ch)
+		}
+
+		switch event.Key {
+		case termbox.KeySpace:
+			text += " "
+		case termbox.KeyBackspace2:
+			if len(text) == 0 {
+				break
+			}
+			text = text[0 : len(text)-1]
+			clearScreen()
+			printText(text, x, y)
+		case termbox.KeyEnter:
+			return text
+		case termbox.KeyCtrlC, termbox.KeyCtrlZ:
+			termbox.Close()
+			os.Exit(0)
+		}
+
+		printText(text, x, y)
+	}
 }
 
 func compare(validNumbers, inputNumbers []int) (score int) {
@@ -208,13 +254,41 @@ func compare(validNumbers, inputNumbers []int) (score int) {
 }
 
 func clearScreen() {
-	cmd := exec.Command("clear")
-	cmd.Stdout = os.Stdout
-	cmd.Run()
+	termbox.Clear(termbox.ColorDefault, termbox.ColorDefault)
+	err := termbox.Flush()
+	if err != nil {
+		panic(err)
+	}
 }
 
 // just wait for any user input (like 'Press Enter to continue')
 func wait() {
-	var ready string
-	fmt.Scanf("%s", &ready)
+	for {
+		event := termbox.PollEvent()
+		if event.Type != termbox.EventKey {
+			continue
+		}
+
+		switch event.Key {
+		case termbox.KeyEnter:
+			return
+		case termbox.KeyCtrlC, termbox.KeyCtrlZ:
+			termbox.Close()
+			os.Exit(0)
+		}
+	}
+}
+
+func printText(text string, x, y int) {
+	termbox.SetCursor(x, y)
+
+	for _, symbol := range text {
+		x += 1
+		termbox.SetCell(
+			x, y, symbol, termbox.ColorDefault, termbox.ColorDefault,
+		)
+	}
+
+	termbox.SetCursor(x+1, y)
+	termbox.Flush()
 }
